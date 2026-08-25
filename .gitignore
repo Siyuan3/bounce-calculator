@@ -1,0 +1,17 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local experiment inputs and generated outputs
+*.mov
+*.MOV
+*.mp4
+annotations/
+diagnostics/
+outputs/
+*_track.csv
+*_template.png

@@ -22,9 +22,11 @@ from calculate_restitution import (
     run_bridge,
 )
 from restitution_math import (
-    estimate_restitution_from_events,
     estimate_restitution_from_height_events,
 )
+
+
+VIDEO_START_TIME = 0.0
 
 
 def extract_all_frames(
@@ -48,7 +50,7 @@ def extract_all_frames(
 
 
 class HeightFrameSelectionWindow:
-    """Select release and first-rebound apex frames from the full clip."""
+    """Select only the first-rebound apex; release is the first video frame."""
 
     def __init__(
         self,
@@ -61,16 +63,20 @@ class HeightFrameSelectionWindow:
         self.frames = frames
         self.contact_time = contact_time
         self.separation_time = separation_time
-        self.position = 0
-        self.release_position: int | None = None
+        self.position = min(
+            range(len(frames)),
+            key=lambda index: abs(
+                float(frames[index]["timestamp"]) - separation_time
+            ),
+        )
         self.apex_position: int | None = None
         self.result: dict[str, object] | None = None
 
         self.root = tk.Tk()
-        self.root.title("高度法恢复系数：选择释放帧和第一次反弹最高点")
+        self.root.title("高度法恢复系数：选择第一次反弹最高点")
         tk.Label(
             self.root,
-            text="逐帧浏览：选择释放帧和第一次反弹达到最高点的帧",
+            text="释放帧已固定为视频第一帧；请选择第一次反弹达到最高点的帧",
             font=("Arial", 15),
         ).pack(pady=(10, 6))
         self.image_label = tk.Label(self.root)
@@ -99,18 +105,12 @@ class HeightFrameSelectionWindow:
         event_controls.pack(fill="x", padx=10, pady=6)
         tk.Button(
             event_controls,
-            text="设为释放帧",
-            command=self.mark_release,
-            bg="#ffd166",
-        ).pack(side="left")
-        tk.Button(
-            event_controls,
             text="设为第一次反弹最高点",
             command=self.mark_apex,
             bg="#8ecae6",
-        ).pack(side="right")
+        ).pack(side="right", expand=True)
 
-        self.selection_status = tk.StringVar(value="释放：未选择｜反弹最高点：未选择")
+        self.selection_status = tk.StringVar()
         tk.Label(self.root, textvariable=self.selection_status, font=("Arial", 12)).pack(
             pady=4
         )
@@ -128,6 +128,7 @@ class HeightFrameSelectionWindow:
         self.root.bind("<Shift-Right>", lambda _: self.move(5))
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.photo: ImageTk.PhotoImage | None = None
+        self.update_selection_status()
         self.update_frame()
 
     def current(self) -> dict[str, object]:
@@ -153,34 +154,25 @@ class HeightFrameSelectionWindow:
             f"真实时间 {float(frame['timestamp']):.6f} s"
         )
 
-    def mark_release(self) -> None:
-        self.release_position = self.position
-        self.update_selection_status()
-
     def mark_apex(self) -> None:
         self.apex_position = self.position
         self.update_selection_status()
 
     def reset(self) -> None:
-        self.release_position = None
         self.apex_position = None
         self.update_selection_status()
 
     def update_selection_status(self) -> None:
-        release = (
-            "未选择"
-            if self.release_position is None
-            else f"{float(self.frames[self.release_position]['timestamp']):.6f} s"
-        )
+        release = f"{float(self.frames[0]['timestamp']):.6f} s（视频第一帧）"
         apex = (
             "未选择"
             if self.apex_position is None
             else f"{float(self.frames[self.apex_position]['timestamp']):.6f} s"
         )
         self.selection_status.set(f"释放：{release}｜反弹最高点：{apex}")
-        valid = False
-        if self.release_position is not None and self.apex_position is not None:
-            release_time = float(self.frames[self.release_position]["timestamp"])
+        valid = self.apex_position is not None
+        if self.apex_position is not None:
+            release_time = float(self.frames[0]["timestamp"])
             apex_time = float(self.frames[self.apex_position]["timestamp"])
             valid = (
                 release_time < self.contact_time < self.separation_time < apex_time
@@ -188,21 +180,18 @@ class HeightFrameSelectionWindow:
         self.confirm_button.configure(state="normal" if valid else "disabled")
 
     def confirm(self) -> None:
-        if self.release_position is None or self.apex_position is None:
+        if self.apex_position is None:
             return
-        release = self.frames[self.release_position]
         apex = self.frames[self.apex_position]
-        release_time = float(release["timestamp"])
+        release_time = float(self.frames[0]["timestamp"])
         apex_time = float(apex["timestamp"])
         if not release_time < self.contact_time < self.separation_time < apex_time:
             messagebox.showwarning(
                 "事件顺序错误",
-                "必须满足：释放帧 < 首次接触帧 < 完全离地帧 < 反弹最高点帧",
+                "必须满足：视频第一帧 < 首次接触帧 < 完全离地帧 < 反弹最高点帧",
             )
             return
         self.result = {
-            "release_analysis_frame": int(release["analysis_frame_index"]),
-            "release_timestamp_s": release_time,
             "first_rebound_apex_analysis_frame": int(apex["analysis_frame_index"]),
             "first_rebound_apex_timestamp_s": apex_time,
         }
@@ -215,8 +204,30 @@ class HeightFrameSelectionWindow:
     def run(self) -> dict[str, object]:
         self.root.mainloop()
         if self.result is None:
-            raise RuntimeError("用户取消了释放与反弹最高点标注")
+            raise RuntimeError("用户取消了第一次反弹最高点标注")
         return self.result
+
+
+def video_duration(video: Path) -> float:
+    """Return the positive presentation duration reported by AVFoundation."""
+    result = run_bridge(["info", str(video)])
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    duration = float(payload["duration_s"])
+    if duration <= 0:
+        raise ValueError("视频时长必须大于0秒")
+    return duration
+
+
+def resolve_end_time(video: Path, requested_end_time: float | None) -> float:
+    """Use the full video unless the operator explicitly chooses an earlier end."""
+    duration = video_duration(video)
+    if requested_end_time is None:
+        return duration
+    if not 0 < requested_end_time <= duration + 1e-6:
+        raise ValueError(
+            f"--end-time 必须大于0且不能超过视频时长 {duration:.6f} 秒"
+        )
+    return min(requested_end_time, duration)
 
 
 def parse_args() -> argparse.Namespace:
@@ -225,10 +236,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("video", type=Path, help="原始 MOV/MP4 视频")
     parser.add_argument(
-        "--start-time", type=float, default=14.0, help="跟踪开始时间（秒）"
-    )
-    parser.add_argument(
-        "--end-time", type=float, default=16.5, help="跟踪结束时间（秒）"
+        "--end-time",
+        type=float,
+        help="可选：分析结束时间（秒）；默认使用完整视频",
     )
     parser.add_argument(
         "--save-annotation", type=Path, help="可选：保存人工标注和高度法结果 JSON"
@@ -261,11 +271,9 @@ def main() -> int:
     if not video.is_file():
         print(f"错误：找不到视频：{video}", file=sys.stderr)
         return 2
-    if args.end_time <= args.start_time:
-        print("错误：--end-time 必须大于 --start-time", file=sys.stderr)
-        return 2
-
     try:
+        start_time = VIDEO_START_TIME
+        end_time = resolve_end_time(video, args.end_time)
         with tempfile.TemporaryDirectory(prefix="bounce_height_restitution_") as directory:
             work = Path(directory)
             frame_path = work / "annotation_frame.png"
@@ -279,15 +287,13 @@ def main() -> int:
                         "该标注缺少 tracking_start_time_s；高度法请删除 --annotation，"
                         "从释放前重新框选足球"
                     )
-                if abs(float(saved_start) - args.start_time) > 1e-6:
+                if abs(float(saved_start) - start_time) > 1e-6:
                     raise ValueError(
-                        "标注中的足球框来自不同的开始时间，不能用于当前高度法窗口；"
-                        "请删除 --annotation 并重新框选足球"
+                        "高度法固定从视频第一帧开始；该标注来自其他开始时间，"
+                        "请删除 --annotation 并重新框选物体"
                     )
             else:
-                run_bridge(
-                    ["frame", str(video), str(args.start_time), str(frame_path)]
-                )
+                run_bridge(["frame", str(video), str(start_time), str(frame_path)])
                 annotation = AnnotationWindow(frame_path).run()
 
             box = annotation["ball_box"]
@@ -295,14 +301,21 @@ def main() -> int:
                 [
                     "track",
                     str(video),
-                    str(args.start_time),
-                    str(args.end_time),
+                    str(start_time),
+                    str(end_time),
                     *(str(value) for value in box),
                     str(track_path),
                 ]
             )
             points = read_track(track_path)
+            if not points:
+                raise ValueError("视频第一帧没有有效的小球跟踪结果")
             floor_1, floor_2 = annotation["floor_points"]
+            release_time = points[0].timestamp
+            annotation["release_analysis_frame"] = 0
+            annotation["release_timestamp_s"] = release_time
+            annotation["release_frame_source"] = "first_video_frame"
+            annotation.pop("frame_velocity_method", None)
 
             event_keys = {
                 "first_contact_timestamp_s",
@@ -320,12 +333,8 @@ def main() -> int:
                 contact_time = float(events["first_contact_timestamp_s"])
                 separation_time = float(events["first_separated_timestamp_s"])
 
-            height_event_keys = {
-                "release_timestamp_s",
-                "first_rebound_apex_timestamp_s",
-            }
+            height_event_keys = {"first_rebound_apex_timestamp_s"}
             if height_event_keys.issubset(annotation):
-                release_time = float(annotation["release_timestamp_s"])
                 apex_time = float(annotation["first_rebound_apex_timestamp_s"])
             else:
                 height_frames = extract_all_frames(video, points, work)
@@ -333,18 +342,17 @@ def main() -> int:
                     height_frames, contact_time, separation_time
                 ).run()
                 annotation.update(height_events)
-                release_time = float(height_events["release_timestamp_s"])
                 apex_time = float(height_events["first_rebound_apex_timestamp_s"])
 
-            # Save the four human-confirmed events immediately.  Derived
+            # Save the three human-confirmed events immediately.  Derived
             # height validation may still fail, but the operator should never
             # have to repeat annotations merely because a calculation failed.
             if args.save_annotation:
                 save_annotation(
                     args.save_annotation,
                     annotation,
-                    args.start_time,
-                    args.end_time,
+                    start_time,
+                    end_time,
                 )
 
             restitution, drop_height, rebound_height, release_index, apex_index = (
@@ -358,15 +366,6 @@ def main() -> int:
                     apex_time,
                 )
             )
-            frame_restitution, velocity_before, velocity_after = (
-                estimate_restitution_from_events(
-                    points,
-                    tuple(floor_1),
-                    tuple(floor_2),
-                    contact_time,
-                    separation_time,
-                )
-            )
             annotation["height_method"] = {
                 "release_analysis_frame": release_index,
                 "release_timestamp_s": points[release_index].timestamp,
@@ -377,27 +376,16 @@ def main() -> int:
                 "coefficient_of_restitution": restitution,
                 "formula": "sqrt(first_rebound_height_pixel / drop_height_pixel)",
             }
-            annotation["frame_velocity_method"] = {
-                "first_contact_timestamp_s": contact_time,
-                "first_separated_timestamp_s": separation_time,
-                "normal_velocity_before_pixel_per_s": velocity_before,
-                "normal_velocity_after_pixel_per_s": velocity_after,
-                "coefficient_of_restitution": frame_restitution,
-                "formula": "abs(normal_velocity_after / normal_velocity_before)",
-                "fit_frames_each_side": 10,
-                "timestamp_basis": "video_presentation_timestamp",
-            }
 
             if args.save_annotation:
                 save_annotation(
                     args.save_annotation,
                     annotation,
-                    args.start_time,
-                    args.end_time,
+                    start_time,
+                    end_time,
                 )
 
             print(f"高度比法恢复系数 e_height = {restitution:.3f}")
-            print(f"轨迹帧速度比法恢复系数 e_frame = {frame_restitution:.3f}")
             return 0
     except subprocess.CalledProcessError as error:
         detail = error.stderr.strip() or error.stdout.strip() or str(error)

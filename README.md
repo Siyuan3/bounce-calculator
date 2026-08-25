@@ -141,6 +141,16 @@ python3 calculate_restitution_from_heights.py "/完整路径/football.MOV" \
   --save-annotation annotations/football_height.json
 ```
 
+高度法固定把视频第一帧作为静止释放帧，并默认分析完整视频。你只需要标注物体与地面、首次接触、完全离地和第一次反弹最高点；程序只输出高度比法恢复系数，不再计算速度法结果。视频应当从物体静止、尚未释放的画面开始。
+
+如果只想分析视频前一段，可以指定结束时间：
+
+```bash
+python3 calculate_restitution_from_heights.py "/完整路径/football.MOV" \
+  --end-time 3.2 \
+  --save-annotation annotations/football_height.json
+```
+
 高度法使用：
 
 ```text
